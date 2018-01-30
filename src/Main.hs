@@ -1,4 +1,4 @@
-{-# LANGUAGE RankNTypes, FlexibleContexts, OverloadedStrings, DeriveAnyClass, ApplicativeDo, DeriveFunctor #-}
+{-# LANGUAGE RankNTypes, FlexibleContexts, FlexibleInstances, OverloadedStrings, DeriveAnyClass, ApplicativeDo, DeriveFunctor #-}
 
 module Main where
 
@@ -20,8 +20,15 @@ import qualified System.IO as IO
 
 import Control.Monad.Trans.Resource
 import Control.Monad.Reader
+import Control.Monad.State
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
+
+import Control.Monad.STM
+import Control.Concurrent.STM.TMVar
+import Control.Concurrent.STM.TMChan
+
+import Data.Monoid
 
 
 --lightloop :: AppData -> 
@@ -74,13 +81,25 @@ data Command a =
     | Sendd a
     | Term deriving (Functor, Applicative, Monad)
 
-type Trans = String
+type Transport = String
 
-type Message = (Either Trans Trans)
+type Trans = Either Transport Transport
 
-data Parser a = Parser { parse :: Message -> Session a } deriving (Functor, Applicative, Monad)
+type CurState = String
+
+type Message = (TMVar Trans) -- TMChan (Either Trans Trans)
+
+-- type Parser a = ReaderT Message (StateT CurState IO ) a -- Parser { parse :: Message -> Session a } deriving (Functor, Applicative, Monad)
+type Parser a = ReaderT Message IO a -- Parser { parse :: Message -> Session a } deriving (Functor, Applicative, Monad)
+
+type Result = Bool
+
+-- instance (MonadIO m) => Monoid (m (TMVar a)) where
+   -- mempty = liftIO newEmptyTMVarIO
+--    mappend a b = undefined
 
 
+{-
 instance Alternative Parser where
     empty = undefined
     (<|>) = undefined
@@ -88,45 +107,161 @@ instance Alternative Parser where
 instance MonadPlus Parser where
     mzero = undefined
     mplus = undefined
+-}
 
 
-record :: Parser Message
+errlog :: Parser Result
+errlog = do
+    a <- ask 
+    liftIO $ do
+        rs <- atomically $ tryTakeTMVar a
+        print $ "skipping >> " ++ (show rs)
+        return False
+
+tod :: Transport -> Parser ()
+tod s = do
+    return ()
+
+toa :: Transport -> Parser ()
+toa s = do
+    return ()    
+
+record :: Parser Result
 record = do
-    transmitd "SI_REC_START"
-    recvd "MAIN_ST"
-    transmitu "SI_RECORDING"
+    oneof $ Left "startr"
+    tod "SI_RECORD"
+    waitoneof $ stoprec <|> sirec <|> errlog
+    where
+        stoprec = do
+            oneof $ Left "stopr"
+            rs <- waitfor $ Right "siidle"
+            toa "done recording"
+            return rs
+        sirec = do
+            oneof $ Right "sirec"
+            rs <- waitoneof $ stoprec <|> sirec  <|> errlog
+            toa "recording"
+            return rs
 
+recvu a = oneof a
 
-transmitd :: Trans -> Parser Message
-transmitd s = do
-    recvu s 
-    sendd s
+oneof :: Trans -> Parser Result
+oneof s = do 
+    a <- ask 
+    rs <- liftIO $ atomically $ readTMVar a
+    liftIO $ print $ "having " ++ (show rs)
+    liftIO $ print $ "looking for " ++ (show s)
+    guard ((rs == s))
+    liftIO $ print $ "it is" ++ (show rs)
+    liftIO $ atomically $ takeTMVar a
+    return True
 
-transmitu :: Trans -> Parser Message
-transmitu s = do
-    recvd s 
-    sendu s   
+waitfor :: Trans -> Parser Result
+waitfor s = do
+    loop
+    where
+        loop = do
+            a <- ask
+            rs <- liftIO $ atomically $ takeTMVar a
+            if rs == s
+            then do
+                liftIO $ print $ "got " ++ (show rs)
+                return True
+            else do
+                liftIO $ print $ "skip " ++ (show rs)
+                loop
 
-
-recvu :: Trans -> Parser Message
-recvu s = Parser $ trans 
-    where 
-        trans ((Just s'), Nothing) = do 
-            guard (s' == s)
-            return $ mzero-- Recvu s
+waitoneof :: Parser Result -> Parser Result
+waitoneof p = ReaderT $ \ a -> do
+    rs <- (runReaderT p) a
+    if rs 
+    then return rs
+    else runReaderT (waitoneof p) a
 
 recvd :: Trans -> Parser Message 
 recvd s = undefined
 
-sendu :: Trans -> Parser Message
-sendu s = undefined
+initToBrockerChan :: TMVar Trans -> IO (TMChan Transport, TMChan Transport)
+initToBrockerChan tv = do
+    ab <- newTMChanIO
+    db <- newTMChanIO
+    void $ concurrently
+        (sourceTMChan ab $$ (awaitForever ( \ i -> do liftIO (atomically $ putTMVar tv (Left i)); return ())))
+        (sourceTMChan db $$ (awaitForever ( \ i -> do liftIO (atomically $ putTMVar tv (Right i)); return ())))
+    return (ab, db)
 
-sendd :: Trans -> Parser Message
-sendd s = undefined
+
+
+test :: String -> Trans
+test s = Left s
 
 
 main :: IO ()
 main = do
+    test1
+    return ()
+
+test1 :: IO ()
+test1 = do
+    tv <- newTMVarIO $ test "startr"
+    void $ concurrently
+        (do 
+            atomically (putTMVar tv (Right "sirec"))
+            atomically (putTMVar tv (Right "sirec"))
+            atomically (putTMVar tv (Right "sirec"))
+            atomically (putTMVar tv (Right "stopr"))
+            atomically (putTMVar tv (Right "stopr"))
+            atomically (putTMVar tv (Left "stopr"))
+            atomically (putTMVar tv (Right "xxx"))
+            atomically (putTMVar tv (Left "xxx"))
+            atomically (putTMVar tv (Right "siidle"))
+            atomically (putTMVar tv (Right "siidle"))
+            atomically (putTMVar tv (Right "siidle")))
+        (runReaderT record tv)
+    print "done test1"
+
+test1a :: IO ()
+test1a = do
+    tv <- newTMVarIO $ test "startr"
+    void $ concurrently
+        (do 
+            atomically (putTMVar tv (Right "sirec"))
+            atomically (putTMVar tv (Right "sirec"))
+            atomically (putTMVar tv (Right "sirec"))
+            atomically (putTMVar tv (Right "stopr"))
+            atomically (putTMVar tv (Left "stopr")))
+        (runReaderT record tv)
+    print "done test1"
+
+
+test2 :: IO ()
+test2 = do
+    tv <- newTMVarIO $ test "startr"
+    void $ concurrently
+        (do 
+            atomically (putTMVar tv (Right "sirec"))
+            atomically (putTMVar tv (Right "sirec"))
+            atomically (putTMVar tv (Right "sirec"))
+            atomically (putTMVar tv (Left "stopr"))
+            atomically (putTMVar tv (Right "siidle")))
+        (runReaderT (record <|> errlog) tv)        
+    print "done test2"
+
+
+test2a :: IO ()
+test2a = do
+    tv <- newTMVarIO $ test "startr"
+    void $ concurrently
+        (do 
+            atomically (putTMVar tv (Right "sirec"))
+            atomically (putTMVar tv (Right "sirec"))
+            atomically (putTMVar tv (Right "sirec"))
+            atomically (putTMVar tv (Left "stopr")))
+        (runReaderT (record <|> errlog) tv)        
+    print "done test2"
+
+main1 :: IO ()
+main1 = do
   args <- getArgs
   start args 
   where 

@@ -29,3 +29,5 @@ executable proto
                        , text
                        , shell-conduit
                        , conduit
+                       , stm
+                       , stm-chans
