@@ -87,7 +87,7 @@ type Trans = Either Transport Transport
 
 type CurState = String
 
-type Message = (TMVar Trans) -- TMChan (Either Trans Trans)
+type Message = (TMChan Transport, TMChan Transport, (TMVar Trans)) -- TMChan (Either Trans Trans)
 
 -- type Parser a = ReaderT Message (StateT CurState IO ) a -- Parser { parse :: Message -> Session a } deriving (Functor, Applicative, Monad)
 type Parser a = ReaderT Message IO a -- Parser { parse :: Message -> Session a } deriving (Functor, Applicative, Monad)
@@ -112,7 +112,7 @@ instance MonadPlus Parser where
 
 errlog :: Parser Result
 errlog = do
-    a <- ask 
+    (ab, dv, a) <- ask 
     liftIO $ do
         rs <- atomically $ tryTakeTMVar a
         print $ "skipping >> " ++ (show rs)
@@ -147,7 +147,7 @@ recvu a = oneof a
 
 oneof :: Trans -> Parser Result
 oneof s = do 
-    a <- ask 
+    (ab, dv, a) <- ask 
     rs <- liftIO $ atomically $ readTMVar a
     liftIO $ print $ "having " ++ (show rs)
     liftIO $ print $ "looking for " ++ (show s)
@@ -161,7 +161,7 @@ waitfor s = do
     loop
     where
         loop = do
-            a <- ask
+            (ab, dv, a) <- ask
             rs <- liftIO $ atomically $ takeTMVar a
             if rs == s
             then do
@@ -190,7 +190,11 @@ initToBrockerChan tv = do
         (sourceTMChan db $$ (awaitForever ( \ i -> do liftIO (atomically $ putTMVar tv (Right i)); return ())))
     return (ab, db)
 
-
+initFromBrockerChan :: IO (TMChan Transport, TMChan Transport)
+initFromBrockerChan = do
+    ba <- newTMChanIO
+    bd <- newTMChanIO
+    return (ba, bd)
 
 test :: String -> Trans
 test s = Left s
@@ -198,12 +202,19 @@ test s = Left s
 
 main :: IO ()
 main = do
+    tv <- newTMVarIO $ test "startr"
+    (ab, db) <- initToBrockerChan tv
+    (ba, db) <- initFromBrockerChan
+    void $ concurrently
+      (stdinC $$  sinkTMChan ab)
+      (appSource server $$ sinkTMChan db)
     test1
     return ()
 
 test1 :: IO ()
 test1 = do
     tv <- newTMVarIO $ test "startr"
+    (ba, db) <- initFromBrockerChan tv
     void $ concurrently
         (do 
             atomically (putTMVar tv (Right "sirec"))
@@ -217,9 +228,9 @@ test1 = do
             atomically (putTMVar tv (Right "siidle"))
             atomically (putTMVar tv (Right "siidle"))
             atomically (putTMVar tv (Right "siidle")))
-        (runReaderT record tv)
+        (runReaderT record (ba, bd, tv))
     print "done test1"
-
+{-
 test1a :: IO ()
 test1a = do
     tv <- newTMVarIO $ test "startr"
@@ -270,3 +281,4 @@ main1 = do
     start ("t":p:_) = telnet (read p)
     start _ = print "Usage postream [u|d|t]"
 
+-}
