@@ -6,6 +6,8 @@ import Control.Monad
 import Control.Applicative
 import Conduit
 import Control.Concurrent.Async (concurrently)
+import Control.Concurrent (forkIO)
+
 import Data.Conduit.TMChan
 import Data.Conduit.Network
 import Data.Word8 (toUpper)
@@ -81,7 +83,7 @@ data Command a =
     | Sendd a
     | Term deriving (Functor, Applicative, Monad)
 
-type Transport = String
+type Transport = S.ByteString
 
 type Trans = Either Transport Transport
 
@@ -113,6 +115,7 @@ instance MonadPlus Parser where
 errlog :: Parser Result
 errlog = do
     (ab, dv, a) <- ask 
+    tod "xxx"
     liftIO $ do
         rs <- atomically $ tryTakeTMVar a
         print $ "skipping >> " ++ (show rs)
@@ -120,10 +123,13 @@ errlog = do
 
 tod :: Transport -> Parser ()
 tod s = do
+    (_, bd, _) <- ask
+    liftIO $ atomically $ writeTMChan bd s
     return ()
 
 toa :: Transport -> Parser ()
 toa s = do
+    
     return ()    
 
 record :: Parser Result
@@ -185,9 +191,9 @@ initToBrockerChan :: TMVar Trans -> IO (TMChan Transport, TMChan Transport)
 initToBrockerChan tv = do
     ab <- newTMChanIO
     db <- newTMChanIO
-    void $ concurrently
-        (sourceTMChan ab $$ (awaitForever ( \ i -> do liftIO (atomically $ putTMVar tv (Left i)); return ())))
-        (sourceTMChan db $$ (awaitForever ( \ i -> do liftIO (atomically $ putTMVar tv (Right i)); return ())))
+    forkIO $ void $ concurrently
+              (sourceTMChan ab $$ (awaitForever ( \ i -> do liftIO (print ">>>in ab");liftIO (atomically $ putTMVar tv (Left i)); return ())))
+              (sourceTMChan db $$ (awaitForever ( \ i -> do liftIO (print ">>>in db");liftIO (atomically $ putTMVar tv (Right i)); return ())))
     return (ab, db)
 
 initFromBrockerChan :: IO (TMChan Transport, TMChan Transport)
@@ -196,25 +202,31 @@ initFromBrockerChan = do
     bd <- newTMChanIO
     return (ba, bd)
 
-test :: String -> Trans
+test :: S.ByteString -> Trans
 test s = Left s
+
+
 
 
 main :: IO ()
 main = do
     tv <- newTMVarIO $ test "startr"
     (ab, db) <- initToBrockerChan tv
-    (ba, db) <- initFromBrockerChan
-    void $ concurrently
-      (stdinC $$  sinkTMChan ab)
-      (appSource server $$ sinkTMChan db)
-    test1
+    (ba, bd) <- initFromBrockerChan
+    forkIO $ runTCPClient (clientSettings 4001 "localhost") $ \server -> 
+                void $ concurrently
+                  (stdinC $$  sinkTMChan ab True)
+                  (appSource server $$ ((awaitForever ( \ i -> do liftIO (print "+++++");yield i)) .| sinkTMChan db True))
+
+    forkIO $ runTCPClient (clientSettings 4001 "localhost") $ \server -> 
+                void $ concurrently
+                  (sourceTMChan bd $$ appSink server)
+                  (sourceTMChan ba $$ stdoutC)
+    runReaderT record (ba, bd, tv)
     return ()
 
-test1 :: IO ()
-test1 = do
-    tv <- newTMVarIO $ test "startr"
-    (ba, db) <- initFromBrockerChan tv
+test1 :: (TMChan Transport, TMChan Transport, TMVar Trans) -> IO ()
+test1  c@(ba, bd, tv) = do
     void $ concurrently
         (do 
             atomically (putTMVar tv (Right "sirec"))
@@ -228,7 +240,7 @@ test1 = do
             atomically (putTMVar tv (Right "siidle"))
             atomically (putTMVar tv (Right "siidle"))
             atomically (putTMVar tv (Right "siidle")))
-        (runReaderT record (ba, bd, tv))
+        (runReaderT record c)
     print "done test1"
 {-
 test1a :: IO ()
